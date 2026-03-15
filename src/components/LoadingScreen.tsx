@@ -15,8 +15,10 @@ export default function LoadingScreen({ loaded }: Props) {
       }, 200)
       return () => clearInterval(interval)
     } else {
-      setProgress(100)
-      setTimeout(() => setHidden(true), 800)
+      setTimeout(() => {
+        setProgress(100)
+        setTimeout(() => setHidden(true), 800)
+      }, 0)
     }
   }, [loaded])
 

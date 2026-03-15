@@ -266,7 +266,7 @@ function ZoneOverlays() {
             style={{ pointerEvents: 'auto' }}
             occlude={false}
           >
-            <ZoneVisibility index={i} visible={visibilities[i]} content={contentMap[zone.name]} />
+            <ZoneVisibility visible={visibilities[i]} content={contentMap[zone.name]} />
           </Html>
         </group>
       ))}

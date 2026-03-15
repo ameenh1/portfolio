@@ -25,6 +25,7 @@
 html, body, #root {
   width: 100%;
   height: 100%;
+  overflow: hidden;
 }
 
 body {
@@ -32,7 +33,6 @@ body {
   background: var(--color-dark-950);
   color: var(--color-warm-200);
   -webkit-font-smoothing: antialiased;
-  overflow-x: hidden;
 }
 
 h1, h2, h3, h4, h5, h6 {
@@ -44,49 +44,219 @@ h1, h2, h3, h4, h5, h6 {
   color: #fff;
 }
 
-::-webkit-scrollbar { width: 5px; }
-::-webkit-scrollbar-track { background: var(--color-dark-950); }
-::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.08); border-radius: 3px; }
+::-webkit-scrollbar { width: 0; }
 
-/* ── Cloud transition keyframes ── */
-@keyframes white-cover {
-  0%   { opacity: 0; }
-  35%  { opacity: 0.95; }
-  55%  { opacity: 0.95; }
-  100% { opacity: 0; }
+/* ── Loading screen ── */
+.loading-screen {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  background: #0a0a0c;
+  transition: opacity 0.8s ease;
 }
-@keyframes cloud-sweep-left {
-  0%   { transform: translateX(60vw); opacity: 0; }
-  30%  { opacity: 1; }
-  60%  { opacity: 0.8; }
-  100% { transform: translateX(-100vw); opacity: 0; }
+.loading-screen.loaded {
+  opacity: 0;
+  pointer-events: none;
 }
-@keyframes cloud-sweep-right {
-  0%   { transform: translateX(-60vw); opacity: 0; }
-  30%  { opacity: 1; }
-  60%  { opacity: 0.7; }
-  100% { transform: translateX(100vw); opacity: 0; }
+.loading-bar-track {
+  width: 200px;
+  height: 3px;
+  background: rgba(255,255,255,0.08);
+  border-radius: 2px;
+  overflow: hidden;
+  margin-top: 24px;
 }
-@keyframes cloud-sweep-up {
-  0%   { transform: translateY(40vh); opacity: 0; }
-  25%  { opacity: 1; }
-  55%  { opacity: 0.6; }
-  100% { transform: translateY(-100vh); opacity: 0; }
-}
-
-/* Glass card */
-.glass-card {
-  background: rgba(17, 17, 20, 0.65);
-  backdrop-filter: blur(24px);
-  -webkit-backdrop-filter: blur(24px);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+.loading-bar-fill {
+  height: 100%;
+  background: var(--color-accent);
+  border-radius: 2px;
+  transition: width 0.3s ease;
 }
 
-/* Subtle hover lift */
-.hover-lift {
-  transition: transform 0.3s ease, box-shadow 0.3s ease;
+/* ── Zone overlay panels ── */
+.zone-panel {
+  pointer-events: auto;
+  background: rgba(10, 10, 12, 0.85);
+  backdrop-filter: blur(20px);
+  -webkit-backdrop-filter: blur(20px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 16px;
+  padding: 24px;
+  color: #e8dfd6;
+  max-width: 340px;
+  width: 100%;
+  transform: translateY(10px);
+  opacity: 0;
+  transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
 }
-.hover-lift:hover {
-  transform: translateY(-3px);
-  box-shadow: 0 12px 40px rgba(0,0,0,0.3);
+.zone-panel.visible {
+  transform: translateY(0);
+  opacity: 1;
+}
+
+.zone-panel h3 {
+  font-family: var(--font-display);
+  font-size: 1.25rem;
+  font-weight: 700;
+  color: #fff;
+  margin-bottom: 8px;
+}
+
+.zone-panel .zone-subtitle {
+  font-size: 0.75rem;
+  color: var(--color-accent);
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  margin-bottom: 12px;
+}
+
+.zone-panel p {
+  font-size: 0.8rem;
+  line-height: 1.6;
+  color: rgba(212, 200, 187, 0.7);
+  margin-bottom: 16px;
+}
+
+.zone-panel .tag {
+  display: inline-block;
+  padding: 3px 10px;
+  border-radius: 6px;
+  background: rgba(255,255,255,0.04);
+  border: 1px solid rgba(255,255,255,0.06);
+  font-size: 0.65rem;
+  color: var(--color-warm-400);
+  margin-right: 4px;
+  margin-bottom: 4px;
+}
+
+.zone-panel .social-link {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  color: var(--color-warm-400);
+  text-decoration: none;
+  font-size: 0.8rem;
+  transition: all 0.2s ease;
+  margin-bottom: 6px;
+}
+.zone-panel .social-link:hover {
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+  border-color: var(--color-accent-muted);
+}
+
+/* ── Scroll hint ── */
+.scroll-hint {
+  position: fixed;
+  bottom: 32px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 50;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  color: rgba(255,255,255,0.4);
+  font-size: 0.7rem;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  transition: opacity 0.6s ease;
+  pointer-events: none;
+}
+.scroll-hint .mouse {
+  width: 20px;
+  height: 32px;
+  border-radius: 12px;
+  border: 1.5px solid rgba(255,255,255,0.2);
+  display: flex;
+  justify-content: center;
+  padding-top: 6px;
+}
+.scroll-hint .dot {
+  width: 3px;
+  height: 6px;
+  border-radius: 2px;
+  background: rgba(255,255,255,0.4);
+  animation: scrollDot 1.5s ease-in-out infinite;
+}
+@keyframes scrollDot {
+  0%, 100% { transform: translateY(0); opacity: 1; }
+  50% { transform: translateY(6px); opacity: 0.3; }
+}
+
+/* ── Progress indicator ── */
+.progress-bar {
+  position: fixed;
+  top: 0;
+  left: 0;
+  height: 2px;
+  background: var(--color-accent);
+  z-index: 60;
+  transition: width 0.1s linear;
+  box-shadow: 0 0 8px var(--color-accent-muted);
+}
+
+/* ── Skill items in zone panel ── */
+.skill-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+.skill-item {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 4px;
+  border-radius: 8px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.05);
+  font-size: 0.65rem;
+  color: var(--color-warm-300);
+  transition: all 0.2s ease;
+}
+.skill-item:hover {
+  background: rgba(255,255,255,0.06);
+  color: #fff;
+}
+.skill-item .skill-icon {
+  font-size: 1.1rem;
+  color: var(--color-accent);
+}
+
+/* ── Award card ── */
+.award-card {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.03);
+  border: 1px solid rgba(255,255,255,0.06);
+  margin-bottom: 6px;
+}
+.award-card .award-info .award-name {
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+}
+.award-card .award-info .award-project {
+  font-size: 0.65rem;
+  color: var(--color-warm-400);
+  margin-top: 2px;
+}
+.award-card .award-badge {
+  font-size: 0.7rem;
+  font-weight: 600;
+  color: var(--color-accent);
+  white-space: nowrap;
 }

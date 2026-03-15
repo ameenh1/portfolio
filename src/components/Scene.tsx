@@ -1,6 +1,6 @@
-import { useRef, useMemo, useState } from 'react'
+import { useEffect, useRef, useMemo, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { useScroll, Float, Html, Stars } from '@react-three/drei'
+import { useScroll, Float, Html, Stars, ContactShadows } from '@react-three/drei'
 import * as THREE from 'three'
 import Mountain, {
   Hiker,
@@ -9,8 +9,11 @@ import Mountain, {
   Lantern,
   Crystal,
   generateTrailCurve,
+  getTerrainHeight,
 } from './Mountain'
 import { FiGithub, FiLinkedin, FiMail } from 'react-icons/fi'
+import { createSoftShadowTexture, createToyMatcapTexture } from '../utils/toyTextures'
+import { onTerrainSurfaceChange, sampleTerrainSurface } from '../utils/terrainSnap'
 
 /* ═══════════════════════════════════════
    DATA
@@ -60,10 +63,20 @@ function CameraRig() {
   const scroll = useScroll()
   const currentPos = useMemo(() => new THREE.Vector3(), [])
   const currentLookAt = useMemo(() => new THREE.Vector3(), [])
+  const smoothedScroll = useRef(0)
   const tempTangent = useMemo(() => new THREE.Vector3(), [])
+  const cameraOffset = useMemo(() => new THREE.Vector3(), [])
+  const outward = useMemo(() => new THREE.Vector3(), [])
+  const targetCamPos = useMemo(() => new THREE.Vector3(), [])
+  const targetLookAt = useMemo(() => new THREE.Vector3(), [])
 
-  useFrame(({ camera }) => {
-    const t = Math.min(scroll.offset, 0.999)
+  useFrame(({ camera }, delta) => {
+    smoothedScroll.current = THREE.MathUtils.lerp(
+      smoothedScroll.current,
+      scroll.offset,
+      1 - Math.exp(-delta * 5.5),
+    )
+    const t = Math.min(smoothedScroll.current, 0.999)
 
     // Character position on trail
     const charPos = trailCurve.getPointAt(t)
@@ -72,22 +85,18 @@ function CameraRig() {
     tempTangent.normalize()
 
     // Camera goes BEHIND the character (opposite tangent) and UP + further out
-    const cameraOffset = new THREE.Vector3()
     cameraOffset.copy(tempTangent).multiplyScalar(-8) // 8 units behind
-    cameraOffset.y += 5  // 5 units above
+    cameraOffset.add(new THREE.Vector3(0, 5, 0))
     // Also offset outward from mountain center for better view
-    const outward = new THREE.Vector3(charPos.x, 0, charPos.z).normalize()
+    outward.set(charPos.x, 0, charPos.z).normalize()
     cameraOffset.add(outward.multiplyScalar(4))
 
-    const targetCamPos = new THREE.Vector3().copy(charPos).add(cameraOffset)
-    const targetLookAt = new THREE.Vector3().copy(charPos).add(
-      new THREE.Vector3().copy(tempTangent).multiplyScalar(3)
-    )
-    targetLookAt.y += 1.5
+    targetCamPos.copy(charPos).add(cameraOffset)
+    targetLookAt.copy(charPos).add(tempTangent.clone().multiplyScalar(3)).add(new THREE.Vector3(0, 1.5, 0))
 
     // Smooth follow
-    currentPos.lerp(targetCamPos, 0.04)
-    currentLookAt.lerp(targetLookAt, 0.04)
+    currentPos.lerp(targetCamPos, 1 - Math.exp(-delta * 4))
+    currentLookAt.lerp(targetLookAt, 1 - Math.exp(-delta * 6.5))
 
     camera.position.copy(currentPos)
     camera.lookAt(currentLookAt)
@@ -103,6 +112,10 @@ function HikerOnTrail() {
   const scroll = useScroll()
   const groupRef = useRef<THREE.Group>(null)
   const tempTangent = useMemo(() => new THREE.Vector3(), [])
+  const groundNormal = useMemo(() => new THREE.Vector3(), [])
+  const up = useMemo(() => new THREE.Vector3(0, 1, 0), [])
+  const tiltQuat = useMemo(() => new THREE.Quaternion(), [])
+  const lookTarget = useMemo(() => new THREE.Vector3(), [])
 
   useFrame(() => {
     if (!groupRef.current) return
@@ -110,10 +123,18 @@ function HikerOnTrail() {
     const pos = trailCurve.getPointAt(t)
     trailCurve.getTangentAt(t, tempTangent)
 
-    groupRef.current.position.copy(pos)
+    const hit = sampleTerrainSurface(pos.x, pos.z)
+    const y = hit ? hit.point.y : pos.y
+    groundNormal.copy(hit ? hit.normal : up)
+
+    groupRef.current.position.set(pos.x, y + 0.02, pos.z)
     // Face the direction of travel
-    const lookTarget = new THREE.Vector3().copy(pos).add(tempTangent)
+    lookTarget.copy(pos).add(tempTangent)
+    lookTarget.y = y
     groupRef.current.lookAt(lookTarget)
+
+    tiltQuat.setFromUnitVectors(up, groundNormal)
+    groupRef.current.quaternion.slerp(tiltQuat.multiply(groupRef.current.quaternion), 0.25)
   })
 
   return (
@@ -326,9 +347,67 @@ function ZoneMarkers() {
    TRAIL PATH LINE — visible faint line along the trail
    ═══════════════════════════════════════ */
 function TrailPath() {
-  const tubeGeometry = useMemo(() => {
-    return new THREE.TubeGeometry(trailCurve, 200, 0.6, 8, false)
+  const pathMatcap = useMemo(() => createToyMatcapTexture(1024), [])
+  const [surfaceVersion, setSurfaceVersion] = useState(0)
+
+  useEffect(() => {
+    return onTerrainSurfaceChange(() => setSurfaceVersion((v) => v + 1))
   }, [])
+
+  const ribbonGeometry = useMemo(() => {
+    const segments = 460
+    const halfWidth = 1.05
+    const carveDepth = 0.14
+    const vertices: number[] = []
+    const uvs: number[] = []
+    const indices: number[] = []
+
+    const tangent = new THREE.Vector3()
+    const side = new THREE.Vector3()
+    const up = new THREE.Vector3(0, 1, 0)
+
+    for (let i = 0; i <= segments; i++) {
+      const t = i / segments
+      const p = trailCurve.getPointAt(t)
+      trailCurve.getTangentAt(t, tangent)
+      side.crossVectors(up, tangent).normalize()
+
+      const leftX = p.x + side.x * halfWidth
+      const leftZ = p.z + side.z * halfWidth
+      const rightX = p.x - side.x * halfWidth
+      const rightZ = p.z - side.z * halfWidth
+
+      const leftHit = sampleTerrainSurface(leftX, leftZ)
+      const rightHit = sampleTerrainSurface(rightX, rightZ)
+
+      const leftY = (leftHit ? leftHit.point.y : getTerrainHeight(leftX, leftZ)) - carveDepth
+      const rightY = (rightHit ? rightHit.point.y : getTerrainHeight(rightX, rightZ)) - carveDepth
+
+      vertices.push(leftX, leftY, leftZ)
+      vertices.push(rightX, rightY, rightZ)
+
+      const v = t * 22
+      uvs.push(0, v)
+      uvs.push(1, v)
+    }
+
+    for (let i = 0; i < segments; i++) {
+      const a = i * 2
+      const b = a + 1
+      const c = a + 2
+      const d = a + 3
+      indices.push(a, b, c)
+      indices.push(c, b, d)
+    }
+
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+    geometry.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
+    geometry.setIndex(indices)
+    geometry.computeVertexNormals()
+
+    return geometry
+  }, [surfaceVersion])
 
   const lineGeometry = useMemo(() => {
     const pts = trailCurve.getPoints(200)
@@ -339,16 +418,51 @@ function TrailPath() {
     <group>
       {/* Visible walkable trail ground */}
       <mesh receiveShadow>
-        <primitive object={tubeGeometry} attach="geometry" />
-        <meshStandardMaterial color="#6b5a42" roughness={0.95} metalness={0} />
+        <primitive object={ribbonGeometry} attach="geometry" />
+        <meshMatcapMaterial matcap={pathMatcap} color="#76695e" flatShading />
       </mesh>
       {/* Trail edge highlight */}
       <line>
         <primitive object={lineGeometry} attach="geometry" />
-        <lineBasicMaterial color="#8b7355" transparent opacity={0.15} />
+        <lineBasicMaterial color="#c3b19e" transparent opacity={0.18} />
       </line>
     </group>
   )
+}
+
+function SkyDome() {
+  const geometry = useMemo(() => new THREE.SphereGeometry(180, 64, 32), [])
+  const material = useMemo(() => {
+    return new THREE.ShaderMaterial({
+      side: THREE.BackSide,
+      depthWrite: false,
+      uniforms: {
+        topColor: { value: new THREE.Color('#0c1526') },
+        bottomColor: { value: new THREE.Color('#1a1f2a') },
+      },
+      vertexShader: `
+        varying vec3 vWorldPosition;
+        void main() {
+          vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+          vWorldPosition = worldPosition.xyz;
+          gl_Position = projectionMatrix * viewMatrix * worldPosition;
+        }
+      `,
+      fragmentShader: `
+        varying vec3 vWorldPosition;
+        uniform vec3 topColor;
+        uniform vec3 bottomColor;
+        void main() {
+          float h = normalize(vWorldPosition).y * 0.5 + 0.5;
+          h = smoothstep(0.05, 0.95, h);
+          vec3 color = mix(bottomColor, topColor, h);
+          gl_FragColor = vec4(color, 1.0);
+        }
+      `,
+    })
+  }, [])
+
+  return <mesh geometry={geometry} material={material} />
 }
 
 /* ═══════════════════════════════════════
@@ -357,31 +471,44 @@ function TrailPath() {
 const CRYSTAL_COLORS = ['#55aaff', '#e85eff', '#ff6b8a', '#ffd700', '#55ff88']
 
 function TrailProps() {
+  const [surfaceVersion, setSurfaceVersion] = useState(0)
+
+  useEffect(() => {
+    return onTerrainSurfaceChange(() => setSurfaceVersion((v) => v + 1))
+  }, [])
+
+  const snap = (x: number, z: number, embed = 0.03): [number, number, number] => {
+    const hit = sampleTerrainSurface(x, z)
+    if (!hit) return [x, getTerrainHeight(x, z) - embed, z]
+    return [hit.point.x, hit.point.y - embed, hit.point.z]
+  }
+
   const campfirePos = useMemo(() => {
     const p = trailCurve.getPointAt(0.02)
-    return [p.x + 1.5, p.y, p.z] as [number, number, number]
-  }, [])
+    return snap(p.x + 1.5, p.z, 0.02)
+  }, [surfaceVersion])
 
   const signPositions = useMemo(() => {
     return [0.15, 0.35, 0.55, 0.75].map(t => {
       const p = trailCurve.getPointAt(t)
-      return [p.x + 0.5, p.y, p.z + 0.5] as [number, number, number]
+      return snap(p.x + 0.5, p.z + 0.5, 0.03)
     })
-  }, [])
+  }, [surfaceVersion])
 
   const lanternPositions = useMemo(() => {
     return [0.05, 0.12, 0.25, 0.38, 0.5, 0.62, 0.72, 0.85].map(t => {
       const p = trailCurve.getPointAt(t)
-      return [p.x + 0.8, p.y, p.z + 0.8] as [number, number, number]
+      return snap(p.x + 0.8, p.z + 0.8, 0.02)
     })
-  }, [])
+  }, [surfaceVersion])
 
   const crystalPositions = useMemo(() => {
     return [0.18, 0.4, 0.6, 0.8, 0.95].map((t, i) => {
       const p = trailCurve.getPointAt(t)
-      return { pos: [p.x - 0.5, p.y + 1.5, p.z - 0.5] as [number, number, number], color: CRYSTAL_COLORS[i] }
+      const [x, y, z] = snap(p.x - 0.5, p.z - 0.5, -1.4)
+      return { pos: [x, y, z] as [number, number, number], color: CRYSTAL_COLORS[i] }
     })
-  }, [])
+  }, [surfaceVersion])
 
   return (
     <>
@@ -506,22 +633,28 @@ function SummitFlag() {
    ENVIRONMENT
    ═══════════════════════════════════════ */
 function Environment() {
+  const softShadow = useMemo(() => createSoftShadowTexture(256), [])
+
   return (
     <>
-      {/* Warm sunset hemisphere — sky + ground bounce */}
-      <hemisphereLight args={['#ffb870', '#3a6b28', 0.6]} />
-      {/* Main sun — warm golden hour */}
+      {/* Warm toy-studio lighting stack */}
+      <hemisphereLight args={['#f7d0a4', '#5f4f3f', 0.95]} />
       <directionalLight position={[25, 35, 15]} intensity={1.8} color="#ffe0b0" castShadow
         shadow-mapSize-width={1024} shadow-mapSize-height={1024}
         shadow-camera-far={80} shadow-camera-left={-30} shadow-camera-right={30}
         shadow-camera-top={30} shadow-camera-bottom={-30}
       />
-      {/* Cool fill from the shadow side */}
-      <directionalLight position={[-15, 15, -10]} intensity={0.4} color="#aaccff" />
-      {/* Subtle warm rim light */}
-      <directionalLight position={[-10, 5, 20]} intensity={0.3} color="#ff9060" />
-      <ambientLight intensity={0.25} color="#ffeedd" />
+      <directionalLight position={[-18, 20, -12]} intensity={0.85} color="#a9c0e0" />
+      <directionalLight position={[-14, 7, 22]} intensity={0.55} color="#ff9a63" />
+      <ambientLight intensity={0.52} color="#fff0dd" />
       <Stars radius={120} depth={80} count={1500} factor={4} saturation={0.2} fade speed={0.3} />
+      <ContactShadows position={[0, 0.2, 0]} opacity={0.35} width={52} height={52} blur={2.6} far={28} smooth />
+      {zones.map((zone, i) => (
+        <mesh key={`shadow-${zone.name}-${i}`} rotation={[-Math.PI / 2, 0, 0]} position={[zone.position.x, zone.position.y + 0.03, zone.position.z]}>
+          <planeGeometry args={[3.1, 3.1]} />
+          <meshBasicMaterial map={softShadow} transparent opacity={0.32} depthWrite={false} />
+        </mesh>
+      ))}
     </>
   )
 }
@@ -533,6 +666,7 @@ export default function Scene() {
   return (
     <>
       <CameraRig />
+      <SkyDome />
       <Environment />
       <Mountain />
       <TrailPath />

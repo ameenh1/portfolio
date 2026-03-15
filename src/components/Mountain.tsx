@@ -1,6 +1,8 @@
-import { useMemo, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
 import { useFrame } from '@react-three/fiber'
+import { createToyMatcapTexture } from '../utils/toyTextures'
+import { onTerrainSurfaceChange, registerTerrainSurface, sampleTerrainSurface } from '../utils/terrainSnap'
 
 /* ─────────────── NOISE ─────────────── */
 function hash(x: number, y: number, z: number): number {
@@ -28,22 +30,41 @@ function fbm(x: number, y: number, z: number, oct = 4): number {
 /* ─────────────── TERRAIN CONFIG ─────────────── */
 export const TERRAIN_SIZE = 80        // total terrain width/depth
 export const TERRAIN_PEAK_HEIGHT = 22 // maximum elevation at center
-const SEGMENTS = 150                  // resolution
+const MOUNTAIN_BASE_RADIUS = 34
+const MOUNTAIN_SEGMENTS_RADIAL = 220
+const MOUNTAIN_SEGMENTS_HEIGHT = 140
+const MOUNTAIN_SKIRT_DEPTH = 8
+
+export const TOY_MATCAP_URL = 'procedural://toy-matcap'
 
 /**
  * Get the terrain height at any world XZ position.
  * Matches the same displacement used to build the geometry.
  */
 export function getTerrainHeight(wx: number, wz: number): number {
-  const nx = wx / TERRAIN_SIZE, nz = wz / TERRAIN_SIZE
-  const distFromCenter = Math.sqrt(nx * nx + nz * nz) * 2
-  // Bell curve: peak at center, falls off toward edges
-  const bell = Math.exp(-distFromCenter * distFromCenter * 2.5)
-  // Multi-octave detail
-  const large = fbm(wx * 0.04, 0, wz * 0.04, 3) * 2
-  const detail = fbm(wx * 0.12, 0, wz * 0.12, 3) * 0.5
-  const ridge = Math.abs(fbm(wx * 0.06 + 50, 0, wz * 0.06 + 50, 2) - 0.5) * 3
-  return (bell * TERRAIN_PEAK_HEIGHT + large + detail + ridge * bell) * Math.max(0, 1 - distFromCenter * 0.3)
+  const r = Math.sqrt(wx * wx + wz * wz)
+  const falloff = THREE.MathUtils.clamp(1 - r / MOUNTAIN_BASE_RADIUS, 0, 1)
+  if (falloff <= 0) return 0
+
+  const cone = Math.pow(falloff, 1.65) * TERRAIN_PEAK_HEIGHT
+  const macro = (fbm(wx * 0.08, 0, wz * 0.08, 4) - 0.5) * 3.4 * falloff
+  const detail = (fbm(wx * 0.26, 20, wz * 0.26, 3) - 0.5) * 1.2 * falloff
+  const ridges = (Math.abs(fbm(wx * 0.13 + 41, 0, wz * 0.13 + 41, 3) - 0.5) - 0.12) * 4.2 * falloff
+
+  return Math.max(0, cone + macro + detail + ridges)
+}
+
+function getTerrainNormal(wx: number, wz: number): THREE.Vector3 {
+  const e = 0.35
+  const hL = getTerrainHeight(wx - e, wz)
+  const hR = getTerrainHeight(wx + e, wz)
+  const hD = getTerrainHeight(wx, wz - e)
+  const hU = getTerrainHeight(wx, wz + e)
+  return new THREE.Vector3(hL - hR, 2 * e, hD - hU).normalize()
+}
+
+function isWalkableSlope(wx: number, wz: number, minYNormal = 0.5): boolean {
+  return getTerrainNormal(wx, wz).y >= minYNormal
 }
 
 /**
@@ -68,71 +89,48 @@ export function generateTrailCurve(): THREE.CatmullRomCurve3 {
 
 /* ─────────────── TERRAIN GEOMETRY ─────────────── */
 function createTerrainGeometry(): THREE.BufferGeometry {
-  const geo = new THREE.PlaneGeometry(TERRAIN_SIZE, TERRAIN_SIZE, SEGMENTS, SEGMENTS)
-  geo.rotateX(-Math.PI / 2) // Make it horizontal
+  const totalHeight = TERRAIN_PEAK_HEIGHT + MOUNTAIN_SKIRT_DEPTH
+  const geo = new THREE.CylinderGeometry(
+    2.8,
+    MOUNTAIN_BASE_RADIUS,
+    totalHeight,
+    MOUNTAIN_SEGMENTS_RADIAL,
+    MOUNTAIN_SEGMENTS_HEIGHT,
+    false,
+  )
 
   const pos = geo.attributes.position
   const cnt = pos.count
 
-  // Displace vertices
+  // Rugged displacement for a faceted toy-rock profile
   for (let i = 0; i < cnt; i++) {
-    const x = pos.getX(i), z = pos.getZ(i)
-    pos.setY(i, getTerrainHeight(x, z))
-  }
-  geo.computeVertexNormals()
-
-  // Color by altitude + slope
-  const normals = geo.attributes.normal
-  const colors = new Float32Array(cnt * 3)
-  for (let i = 0; i < cnt; i++) {
+    const x = pos.getX(i)
     const y = pos.getY(i)
-    const ny = normals.getY(i)
-    const hf = Math.min(1, y / TERRAIN_PEAK_HEIGHT)
-    const steep = 1 - Math.abs(ny)
-    const nv = (fbm(pos.getX(i) * 0.3, y * 0.3, pos.getZ(i) * 0.3, 2) - 0.5) * 0.08
-    let r: number, g: number, b: number
+    const z = pos.getZ(i)
 
-    if (hf < 0.08) {
-      // Water-edge / flat ground — dark lush green
-      r = 0.15 + nv; g = 0.32 + nv; b = 0.1 + nv * 0.5
-    } else if (hf < 0.25) {
-      // Grassy slopes — vibrant green
-      const t = (hf - 0.08) / 0.17
-      r = THREE.MathUtils.lerp(0.15, 0.25, t) + steep * 0.05 + nv
-      g = THREE.MathUtils.lerp(0.32, 0.45, t) + nv
-      b = THREE.MathUtils.lerp(0.1, 0.12, t) + nv * 0.4
-    } else if (hf < 0.45) {
-      // Forest → earthy transition
-      const t = (hf - 0.25) / 0.2
-      r = THREE.MathUtils.lerp(0.25, 0.4, t) + steep * 0.06 + nv
-      g = THREE.MathUtils.lerp(0.45, 0.35, t) + nv
-      b = THREE.MathUtils.lerp(0.12, 0.18, t) + nv * 0.5
-    } else if (hf < 0.65) {
-      // Rocky brown
-      const t = (hf - 0.45) / 0.2
-      r = THREE.MathUtils.lerp(0.4, 0.5, t) + steep * 0.08 + nv
-      g = THREE.MathUtils.lerp(0.35, 0.38, t) + nv
-      b = THREE.MathUtils.lerp(0.18, 0.3, t) + nv
-    } else if (hf < 0.82) {
-      // Slate with purple tint
-      const t = (hf - 0.65) / 0.17
-      r = THREE.MathUtils.lerp(0.5, 0.55, t) + nv
-      g = THREE.MathUtils.lerp(0.38, 0.42, t) + nv
-      b = THREE.MathUtils.lerp(0.3, 0.5, t) + nv
-    } else {
-      // Snow
-      const t = (hf - 0.82) / 0.18
-      const snow = Math.max(0, 1 - steep * 2.5)
-      r = THREE.MathUtils.lerp(0.55, 0.55 + 0.4 * snow, t) + nv * 0.3
-      g = THREE.MathUtils.lerp(0.42, 0.42 + 0.45 * snow, t) + nv * 0.3
-      b = THREE.MathUtils.lerp(0.5, 0.5 + 0.48 * snow, t) + nv * 0.3
-    }
-    colors[i * 3] = Math.max(0, Math.min(1, r))
-    colors[i * 3 + 1] = Math.max(0, Math.min(1, g))
-    colors[i * 3 + 2] = Math.max(0, Math.min(1, b))
+    const angle = Math.atan2(z, x)
+    const radius = Math.sqrt(x * x + z * z)
+    const level = THREE.MathUtils.clamp((y + totalHeight * 0.5) / totalHeight, 0, 1)
+
+    const surfaceHeight = getTerrainHeight(x, z)
+    const noise = fbm(
+      Math.cos(angle) * radius * 0.22 + 15,
+      level * 5.2,
+      Math.sin(angle) * radius * 0.22 - 8,
+      4,
+    ) - 0.5
+
+    const radialJitter = noise * (1 - level * 0.7) * 2.2
+    const nextRadius = Math.max(0.65, radius + radialJitter)
+
+    pos.setX(i, Math.cos(angle) * nextRadius)
+    pos.setY(i, THREE.MathUtils.lerp(-MOUNTAIN_SKIRT_DEPTH, surfaceHeight, level) + noise * 0.9)
+    pos.setZ(i, Math.sin(angle) * nextRadius)
   }
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3))
-  return geo
+  pos.needsUpdate = true
+  const faceted = geo.toNonIndexed()
+  faceted.computeVertexNormals()
+  return faceted
 }
 
 /* ─────────────── PROP HELPERS ─────────────── */
@@ -391,79 +389,118 @@ export function Hiker() {
 /* ─────────────── MAIN TERRAIN COMPONENT ─────────────── */
 export default function Mountain() {
   const terrainGeo = useMemo(() => createTerrainGeometry(), [])
+  const mountainMatcap = useMemo(() => createToyMatcapTexture(1024), [])
+  const terrainRef = useRef<THREE.Mesh>(null)
+  const [surfaceVersion, setSurfaceVersion] = useState(0)
+
+  useEffect(() => {
+    registerTerrainSurface(terrainRef.current)
+    return () => registerTerrainSurface(null)
+  }, [])
+
+  useEffect(() => {
+    return onTerrainSurfaceChange(() => setSurfaceVersion((v) => v + 1))
+  }, [])
+
+  const snapPoint = (x: number, z: number, embed = 0) => {
+    const hit = sampleTerrainSurface(x, z)
+    if (!hit) return { x, y: getTerrainHeight(x, z) - embed, z }
+    return { x: hit.point.x, y: hit.point.y - embed, z: hit.point.z }
+  }
 
   // Place props on the terrain surface
   const trees = useMemo(() => {
     const arr: Array<{ pos: [number, number, number]; scale: number; variant: number; type: 'pine' | 'round' }> = []
-    for (let i = 0; i < 120; i++) {
+    for (let i = 0; i < 220; i++) {
       const a = Math.random() * Math.PI * 2
-      const r = 5 + Math.random() * 32
-      const x = Math.cos(a) * r, z = Math.sin(a) * r
-      const y = getTerrainHeight(x, z)
-      // Only place trees below treeline
-      if (y < TERRAIN_PEAK_HEIGHT * 0.55 && y > 0.5) {
+      const r = 4 + Math.random() * 31
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.04)
+      const y = p.y
+      const gentle = isWalkableSlope(x, z, 0.54)
+      if (y < TERRAIN_PEAK_HEIGHT * 0.82 && y > 0.4 && gentle) {
         arr.push({
-          pos: [x, y, z],
-          scale: 0.4 + Math.random() * 0.8,
+          pos: [p.x, y, p.z],
+          scale: 0.35 + Math.random() * 0.9,
           variant: Math.floor(Math.random() * 5),
           type: Math.random() > 0.4 ? 'pine' : 'round',
         })
       }
     }
     return arr
-  }, [])
+  }, [surfaceVersion])
 
   const bushes = useMemo(() =>
-    Array.from({ length: 50 }, () => {
+    Array.from({ length: 110 }, () => {
       const a = Math.random() * Math.PI * 2, r = 6 + Math.random() * 28
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = getTerrainHeight(x, z)
-      return y < TERRAIN_PEAK_HEIGHT * 0.45 && y > 0.3
-        ? { pos: [x, y, z] as [number, number, number], scale: 0.4 + Math.random() * 0.8 }
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.03)
+      const y = p.y
+      return y < TERRAIN_PEAK_HEIGHT * 0.72 && y > 0.3 && isWalkableSlope(x, z, 0.5)
+        ? { pos: [p.x, y, p.z] as [number, number, number], scale: 0.4 + Math.random() * 0.8 }
         : null
-    }).filter(Boolean) as Array<{ pos: [number, number, number]; scale: number }>, [])
+    }).filter(Boolean) as Array<{ pos: [number, number, number]; scale: number }>, [surfaceVersion])
 
   const flowers = useMemo(() =>
-    Array.from({ length: 25 }, () => {
-      const a = Math.random() * Math.PI * 2, r = 8 + Math.random() * 22
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = getTerrainHeight(x, z)
-      return y < TERRAIN_PEAK_HEIGHT * 0.35 && y > 0.5 ? [x, y, z] as [number, number, number] : null
-    }).filter(Boolean) as Array<[number, number, number]>, [])
+    Array.from({ length: 42 }, () => {
+      const a = Math.random() * Math.PI * 2, r = 5 + Math.random() * 24
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.01)
+      const y = p.y
+      return y < TERRAIN_PEAK_HEIGHT * 0.58 && y > 0.5 && isWalkableSlope(x, z, 0.58)
+        ? [p.x, y, p.z] as [number, number, number]
+        : null
+    }).filter(Boolean) as Array<[number, number, number]>, [surfaceVersion])
 
   const rocks = useMemo(() =>
-    Array.from({ length: 60 }, () => {
-      const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 30
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = getTerrainHeight(x, z)
+    Array.from({ length: 180 }, () => {
+      const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 32
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.05)
+      const y = p.y
       return y > 0.3 ? {
-        pos: [x, y, z] as [number, number, number],
-        scale: 0.3 + Math.random() * 1.2,
+        pos: [p.x, y, p.z] as [number, number, number],
+        scale: 0.2 + Math.random() * 1.05,
         rot: [Math.random() * 0.5, Math.random() * Math.PI, 0] as [number, number, number],
       } : null
-    }).filter(Boolean) as Array<{ pos: [number, number, number]; scale: number; rot: [number, number, number] }>, [])
+    }).filter(Boolean) as Array<{ pos: [number, number, number]; scale: number; rot: [number, number, number] }>, [surfaceVersion])
 
   const grass = useMemo(() =>
-    Array.from({ length: 80 }, () => {
+    Array.from({ length: 180 }, () => {
       const a = Math.random() * Math.PI * 2, r = 5 + Math.random() * 25
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = getTerrainHeight(x, z)
-      return y < TERRAIN_PEAK_HEIGHT * 0.4 && y > 0.3 ? [x, y, z] as [number, number, number] : null
-    }).filter(Boolean) as Array<[number, number, number]>, [])
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.02)
+      const y = p.y
+      return y < TERRAIN_PEAK_HEIGHT * 0.6 && y > 0.3 && isWalkableSlope(x, z, 0.56)
+        ? [p.x, y, p.z] as [number, number, number]
+        : null
+    }).filter(Boolean) as Array<[number, number, number]>, [surfaceVersion])
 
   const fences = useMemo(() =>
     Array.from({ length: 10 }, (_, i) => {
       const a = (i / 10) * Math.PI * 2
       const r = 16 + Math.random() * 4
-      const x = Math.cos(a) * r, z = Math.sin(a) * r, y = getTerrainHeight(x, z)
+      const x = Math.cos(a) * r
+      const z = Math.sin(a) * r
+      const p = snapPoint(x, z, 0.02)
+      const y = p.y
       return y > 0.5 && y < TERRAIN_PEAK_HEIGHT * 0.3 ? {
-        pos: [x, y, z] as [number, number, number],
+        pos: [p.x, y, p.z] as [number, number, number],
         rot: [0, a + Math.PI / 2, 0] as [number, number, number],
       } : null
-    }).filter(Boolean) as Array<{ pos: [number, number, number]; rot: [number, number, number] }>, [])
+    }).filter(Boolean) as Array<{ pos: [number, number, number]; rot: [number, number, number] }>, [surfaceVersion])
 
   return (
     <>
       {/* TERRAIN */}
-      <mesh receiveShadow castShadow>
+      <mesh ref={terrainRef} receiveShadow castShadow>
         <primitive object={terrainGeo} attach="geometry" />
-        <meshStandardMaterial vertexColors roughness={0.85} metalness={0.02} flatShading />
+        <meshMatcapMaterial matcap={mountainMatcap} color="#8f7f74" flatShading />
       </mesh>
 
       {/* PROPS — all placed on terrain surface */}

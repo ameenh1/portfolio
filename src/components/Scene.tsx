@@ -1,6 +1,6 @@
 import { useEffect, useRef, useMemo, useState } from 'react'
 import { useFrame } from '@react-three/fiber'
-import { useScroll, Float, Html, Stars, ContactShadows } from '@react-three/drei'
+import { useScroll, Float, Html, Stars } from '@react-three/drei'
 import * as THREE from 'three'
 import Mountain, {
   Hiker,
@@ -69,6 +69,9 @@ function CameraRig() {
   const outward = useMemo(() => new THREE.Vector3(), [])
   const targetCamPos = useMemo(() => new THREE.Vector3(), [])
   const targetLookAt = useMemo(() => new THREE.Vector3(), [])
+  const upOffset = useMemo(() => new THREE.Vector3(0, 5, 0), [])
+  const lookAtUpOffset = useMemo(() => new THREE.Vector3(0, 1.5, 0), [])
+  const tempLookTangent = useMemo(() => new THREE.Vector3(), [])
 
   useFrame(({ camera }, delta) => {
     smoothedScroll.current = THREE.MathUtils.lerp(
@@ -78,21 +81,25 @@ function CameraRig() {
     )
     const t = Math.min(smoothedScroll.current, 0.999)
 
-    // Character position on trail
+    // Character position on trail — snap Y to mesh surface (matches hiker)
     const charPos = trailCurve.getPointAt(t)
+    const charHit = sampleTerrainSurface(charPos.x, charPos.z)
+    if (charHit) charPos.y = charHit.point.y + 0.02
+
     // Trail direction (tangent)
     trailCurve.getTangentAt(t, tempTangent)
     tempTangent.normalize()
 
     // Camera goes BEHIND the character (opposite tangent) and UP + further out
     cameraOffset.copy(tempTangent).multiplyScalar(-8) // 8 units behind
-    cameraOffset.add(new THREE.Vector3(0, 5, 0))
+    cameraOffset.add(upOffset)
     // Also offset outward from mountain center for better view
     outward.set(charPos.x, 0, charPos.z).normalize()
     cameraOffset.add(outward.multiplyScalar(4))
 
     targetCamPos.copy(charPos).add(cameraOffset)
-    targetLookAt.copy(charPos).add(tempTangent.clone().multiplyScalar(3)).add(new THREE.Vector3(0, 1.5, 0))
+    tempLookTangent.copy(tempTangent).multiplyScalar(3)
+    targetLookAt.copy(charPos).add(tempLookTangent).add(lookAtUpOffset)
 
     // Smooth follow
     currentPos.lerp(targetCamPos, 1 - Math.exp(-delta * 4))
@@ -357,7 +364,7 @@ function TrailPath() {
   const ribbonGeometry = useMemo(() => {
     const segments = 460
     const halfWidth = 1.05
-    const carveDepth = 0.14
+    const liftHeight = 0.08 // sit just above the mesh surface
     const vertices: number[] = []
     const uvs: number[] = []
     const indices: number[] = []
@@ -380,8 +387,8 @@ function TrailPath() {
       const leftHit = sampleTerrainSurface(leftX, leftZ)
       const rightHit = sampleTerrainSurface(rightX, rightZ)
 
-      const leftY = (leftHit ? leftHit.point.y : getTerrainHeight(leftX, leftZ)) - carveDepth
-      const rightY = (rightHit ? rightHit.point.y : getTerrainHeight(rightX, rightZ)) - carveDepth
+      const leftY = (leftHit ? leftHit.point.y : getTerrainHeight(leftX, leftZ)) + liftHeight
+      const rightY = (rightHit ? rightHit.point.y : getTerrainHeight(rightX, rightZ)) + liftHeight
 
       vertices.push(leftX, leftY, leftZ)
       vertices.push(rightX, rightY, rightZ)
@@ -410,16 +417,20 @@ function TrailPath() {
   }, [surfaceVersion])
 
   const lineGeometry = useMemo(() => {
-    const pts = trailCurve.getPoints(200)
+    const pts = trailCurve.getPoints(200).map(p => {
+      const hit = sampleTerrainSurface(p.x, p.z)
+      if (hit) p.y = hit.point.y + 0.12 // slightly above ribbon surface
+      return p
+    })
     return new THREE.BufferGeometry().setFromPoints(pts)
-  }, [])
+  }, [surfaceVersion])
 
   return (
     <group>
       {/* Visible walkable trail ground */}
       <mesh receiveShadow>
         <primitive object={ribbonGeometry} attach="geometry" />
-        <meshMatcapMaterial matcap={pathMatcap} color="#76695e" flatShading />
+        <meshMatcapMaterial matcap={pathMatcap} color="#76695e" flatShading polygonOffset polygonOffsetFactor={-1} polygonOffsetUnits={-1} />
       </mesh>
       {/* Trail edge highlight */}
       <line>
@@ -637,22 +648,19 @@ function Environment() {
 
   return (
     <>
-      {/* Warm toy-studio lighting stack */}
+      {/* Warm toy-studio lighting stack — 2 directional + hemisphere */}
       <hemisphereLight args={['#f7d0a4', '#5f4f3f', 0.95]} />
       <directionalLight position={[25, 35, 15]} intensity={1.8} color="#ffe0b0" castShadow
         shadow-mapSize-width={1024} shadow-mapSize-height={1024}
         shadow-camera-far={80} shadow-camera-left={-30} shadow-camera-right={30}
         shadow-camera-top={30} shadow-camera-bottom={-30}
       />
-      <directionalLight position={[-18, 20, -12]} intensity={0.85} color="#a9c0e0" />
-      <directionalLight position={[-14, 7, 22]} intensity={0.55} color="#ff9a63" />
-      <ambientLight intensity={0.52} color="#fff0dd" />
+      <directionalLight position={[-18, 20, -12]} intensity={1.1} color="#b0c8e4" />
       <Stars radius={120} depth={80} count={1500} factor={4} saturation={0.2} fade speed={0.3} />
-      <ContactShadows position={[0, 0.2, 0]} opacity={0.35} width={52} height={52} blur={2.6} far={28} smooth />
       {zones.map((zone, i) => (
         <mesh key={`shadow-${zone.name}-${i}`} rotation={[-Math.PI / 2, 0, 0]} position={[zone.position.x, zone.position.y + 0.03, zone.position.z]}>
           <planeGeometry args={[3.1, 3.1]} />
-          <meshBasicMaterial map={softShadow} transparent opacity={0.32} depthWrite={false} />
+          <meshBasicMaterial map={softShadow} transparent opacity={0.32} depthWrite={false} polygonOffset polygonOffsetFactor={1} polygonOffsetUnits={1} />
         </mesh>
       ))}
     </>

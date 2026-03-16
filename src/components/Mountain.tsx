@@ -63,9 +63,6 @@ function getTerrainNormal(wx: number, wz: number): THREE.Vector3 {
   return new THREE.Vector3(hL - hR, 2 * e, hD - hU).normalize()
 }
 
-function isWalkableSlope(wx: number, wz: number, minYNormal = 0.5): boolean {
-  return getTerrainNormal(wx, wz).y >= minYNormal
-}
 
 /**
  * The trail path for the camera & hiker.
@@ -142,114 +139,366 @@ const TREE_PALETTES = [
   { trunk: '#8a6a48', leaves: ['#8b5a8b', '#9a6a9a', '#7a4a7a'] },
 ]
 
-function PineTree({ position, scale = 1, variant = 0 }: {
-  position: [number, number, number]; scale?: number; variant?: number
+/* ─────────────── INSTANCED PROP RENDERERS ─────────────── */
+
+/**
+ * Helper: build an InstancedMesh from geometry, material, and per-instance transforms.
+ * Returns the InstancedMesh object ready to be placed via <primitive>.
+ */
+function buildInstancedMesh(
+  geo: THREE.BufferGeometry,
+  mat: THREE.Material,
+  matrices: THREE.Matrix4[],
+): THREE.InstancedMesh {
+  const im = new THREE.InstancedMesh(geo, mat, matrices.length)
+  for (let i = 0; i < matrices.length; i++) {
+    im.setMatrixAt(i, matrices[i])
+  }
+  im.instanceMatrix.needsUpdate = true
+  return im
+}
+
+/**
+ * Pre-builds a Matrix4 from position + uniform scale + Y rotation.
+ */
+function makeMatrix(x: number, y: number, z: number, scale: number, rotY = 0): THREE.Matrix4 {
+  const m = new THREE.Matrix4()
+  const q = new THREE.Quaternion().setFromAxisAngle(_yAxis, rotY)
+  const s = new THREE.Vector3(scale, scale, scale)
+  m.compose(new THREE.Vector3(x, y, z), q, s)
+  return m
+}
+
+const _yAxis = new THREE.Vector3(0, 1, 0)
+
+/**
+ * Pre-builds a Matrix4 from position + uniform scale + Euler rotation.
+ */
+function makeMatrixEuler(x: number, y: number, z: number, scale: number, rx: number, ry: number, rz: number): THREE.Matrix4 {
+  const m = new THREE.Matrix4()
+  const q = new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz))
+  const s = new THREE.Vector3(scale, scale, scale)
+  m.compose(new THREE.Vector3(x, y, z), q, s)
+  return m
+}
+
+/**
+ * InstancedTrees — renders PineTree (4 parts) and RoundTree (3 parts) as instanced meshes.
+ */
+function InstancedTrees({ trees }: {
+  trees: Array<{ pos: [number, number, number]; scale: number; variant: number; type: 'pine' | 'round' }>
 }) {
-  const c = TREE_PALETTES[variant % TREE_PALETTES.length]
+  const meshes = useMemo(() => {
+    const pines = trees.filter(t => t.type === 'pine')
+    const rounds = trees.filter(t => t.type === 'round')
+
+    // Shared geometries
+    const trunkGeoPine = new THREE.CylinderGeometry(0.06, 0.1, 0.8, 6)
+    const cone1Geo = new THREE.ConeGeometry(0.55, 1.1, 7)
+    const cone2Geo = new THREE.ConeGeometry(0.42, 0.85, 7)
+    const cone3Geo = new THREE.ConeGeometry(0.28, 0.6, 7)
+    const trunkGeoRound = new THREE.CylinderGeometry(0.06, 0.1, 1.2, 6)
+    const foliageGeo1 = new THREE.IcosahedronGeometry(0.65, 1)
+    const foliageGeo2 = new THREE.IcosahedronGeometry(0.4, 1)
+
+    // For each variant color, we need separate materials.
+    // Group pines by variant, build instanced meshes per variant per part.
+    const result: THREE.InstancedMesh[] = []
+
+    // ---- PINE TREES: 4 parts × variants ----
+    const pinesByVariant = new Map<number, typeof pines>()
+    for (const p of pines) {
+      const v = p.variant % TREE_PALETTES.length
+      if (!pinesByVariant.has(v)) pinesByVariant.set(v, [])
+      pinesByVariant.get(v)!.push(p)
+    }
+
+    for (const [v, group] of pinesByVariant) {
+      const c = TREE_PALETTES[v]
+      const trunkMat = new THREE.MeshStandardMaterial({ color: c.trunk })
+      const leaf0Mat = new THREE.MeshStandardMaterial({ color: c.leaves[0], flatShading: true })
+      const leaf1Mat = new THREE.MeshStandardMaterial({ color: c.leaves[1], flatShading: true })
+      const leaf2Mat = new THREE.MeshStandardMaterial({ color: c.leaves[2], flatShading: true })
+
+      const trunkMs: THREE.Matrix4[] = []
+      const c1Ms: THREE.Matrix4[] = []
+      const c2Ms: THREE.Matrix4[] = []
+      const c3Ms: THREE.Matrix4[] = []
+
+      for (const t of group) {
+        const [px, py, pz] = t.pos
+        const s = t.scale
+        // Each sub-mesh is offset in local Y, scaled by parent scale
+        trunkMs.push(makeMatrix(px, py + 0.4 * s, pz, s))
+        c1Ms.push(makeMatrix(px, py + 1.1 * s, pz, s))
+        c2Ms.push(makeMatrix(px, py + 1.7 * s, pz, s))
+        c3Ms.push(makeMatrix(px, py + 2.15 * s, pz, s))
+      }
+
+      if (trunkMs.length > 0) {
+        result.push(buildInstancedMesh(trunkGeoPine, trunkMat, trunkMs))
+        result.push(buildInstancedMesh(cone1Geo, leaf0Mat, c1Ms))
+        result.push(buildInstancedMesh(cone2Geo, leaf1Mat, c2Ms))
+        result.push(buildInstancedMesh(cone3Geo, leaf2Mat, c3Ms))
+      }
+    }
+
+    // ---- ROUND TREES: 3 parts × variants ----
+    const roundsByVariant = new Map<number, typeof rounds>()
+    for (const r of rounds) {
+      const v = r.variant % TREE_PALETTES.length
+      if (!roundsByVariant.has(v)) roundsByVariant.set(v, [])
+      roundsByVariant.get(v)!.push(r)
+    }
+
+    for (const [v, group] of roundsByVariant) {
+      const c = TREE_PALETTES[v]
+      const trunkMat = new THREE.MeshStandardMaterial({ color: c.trunk })
+      const f0Mat = new THREE.MeshStandardMaterial({ color: c.leaves[0], flatShading: true })
+      const f1Mat = new THREE.MeshStandardMaterial({ color: c.leaves[1], flatShading: true })
+
+      const trunkMs: THREE.Matrix4[] = []
+      const f0Ms: THREE.Matrix4[] = []
+      const f1Ms: THREE.Matrix4[] = []
+
+      for (const t of group) {
+        const [px, py, pz] = t.pos
+        const s = t.scale
+        trunkMs.push(makeMatrix(px, py + 0.6 * s, pz, s))
+        f0Ms.push(makeMatrix(px, py + 1.5 * s, pz, s))
+        f1Ms.push(makeMatrix(px + 0.25 * s, py + 1.7 * s, pz + 0.15 * s, s))
+      }
+
+      if (trunkMs.length > 0) {
+        result.push(buildInstancedMesh(trunkGeoRound, trunkMat, trunkMs))
+        result.push(buildInstancedMesh(foliageGeo1, f0Mat, f0Ms))
+        result.push(buildInstancedMesh(foliageGeo2, f1Mat, f1Ms))
+      }
+    }
+
+    return result
+  }, [trees])
+
   return (
-    <group position={position} scale={scale}>
-      <mesh position={[0, 0.4, 0]}>
-        <cylinderGeometry args={[0.06, 0.1, 0.8, 6]} />
-        <meshStandardMaterial color={c.trunk} />
-      </mesh>
-      <mesh position={[0, 1.1, 0]}>
-        <coneGeometry args={[0.55, 1.1, 7]} />
-        <meshStandardMaterial color={c.leaves[0]} flatShading />
-      </mesh>
-      <mesh position={[0, 1.7, 0]}>
-        <coneGeometry args={[0.42, 0.85, 7]} />
-        <meshStandardMaterial color={c.leaves[1]} flatShading />
-      </mesh>
-      <mesh position={[0, 2.15, 0]}>
-        <coneGeometry args={[0.28, 0.6, 7]} />
-        <meshStandardMaterial color={c.leaves[2]} flatShading />
-      </mesh>
-    </group>
+    <>
+      {meshes.map((m, i) => <primitive key={i} object={m} />)}
+    </>
   )
 }
 
-function RoundTree({ position, scale = 1, variant = 1 }: {
-  position: [number, number, number]; scale?: number; variant?: number
+/**
+ * InstancedBushes — 2 icosahedron parts per bush.
+ * Bush Y positions shifted UP by 0.10 to prevent clipping below terrain.
+ */
+function InstancedBushes({ bushes }: {
+  bushes: Array<{ pos: [number, number, number]; scale: number }>
 }) {
-  const c = TREE_PALETTES[variant % TREE_PALETTES.length]
+  const meshes = useMemo(() => {
+    const geo1 = new THREE.IcosahedronGeometry(0.28, 1)
+    const geo2 = new THREE.IcosahedronGeometry(0.2, 1)
+    const colors = ['#2d7a22', '#3d8a2e', '#4a9a38']
+    const mat1 = new THREE.MeshStandardMaterial({ color: colors[0], flatShading: true })
+    const mat2 = new THREE.MeshStandardMaterial({ color: '#3a8528', flatShading: true })
+
+    const m1s: THREE.Matrix4[] = []
+    const m2s: THREE.Matrix4[] = []
+
+    for (const b of bushes) {
+      const [px, py, pz] = b.pos
+      const s = b.scale
+      // Shift main sphere up: was 0.18, now 0.28 (+0.10) to prevent bottom clipping
+      m1s.push(makeMatrix(px, py + 0.28 * s, pz, s))
+      // Shift secondary sphere up: was 0.14, now 0.24 (+0.10)
+      m2s.push(makeMatrix(px + 0.15 * s, py + 0.24 * s, pz + 0.1 * s, s))
+    }
+
+    return [
+      buildInstancedMesh(geo1, mat1, m1s),
+      buildInstancedMesh(geo2, mat2, m2s),
+    ]
+  }, [bushes])
+
   return (
-    <group position={position} scale={scale}>
-      <mesh position={[0, 0.6, 0]}>
-        <cylinderGeometry args={[0.06, 0.1, 1.2, 6]} />
-        <meshStandardMaterial color={c.trunk} />
-      </mesh>
-      <mesh position={[0, 1.5, 0]}>
-        <icosahedronGeometry args={[0.65, 1]} />
-        <meshStandardMaterial color={c.leaves[0]} flatShading />
-      </mesh>
-      <mesh position={[0.25, 1.7, 0.15]}>
-        <icosahedronGeometry args={[0.4, 1]} />
-        <meshStandardMaterial color={c.leaves[1]} flatShading />
-      </mesh>
-    </group>
+    <>
+      {meshes.map((m, i) => <primitive key={i} object={m} />)}
+    </>
   )
 }
 
-function Bush({ position, scale = 1 }: { position: [number, number, number]; scale?: number }) {
-  const c = ['#2d7a22', '#3d8a2e', '#4a9a38'][Math.floor(Math.random() * 3)]
-  return (
-    <group position={position} scale={scale}>
-      <mesh position={[0, 0.18, 0]}>
-        <icosahedronGeometry args={[0.28, 1]} />
-        <meshStandardMaterial color={c} flatShading />
-      </mesh>
-      <mesh position={[0.15, 0.14, 0.1]}>
-        <icosahedronGeometry args={[0.2, 1]} />
-        <meshStandardMaterial color="#3a8528" flatShading />
-      </mesh>
-    </group>
-  )
-}
-
-function Rock({ position, scale = 1, rotation }: {
-  position: [number, number, number]; scale?: number; rotation?: [number, number, number]
+/**
+ * InstancedRocks — single dodecahedron per rock.
+ */
+function InstancedRocks({ rocks }: {
+  rocks: Array<{ pos: [number, number, number]; scale: number; rot: [number, number, number] }>
 }) {
+  const mesh = useMemo(() => {
+    const geo = new THREE.DodecahedronGeometry(0.35, 0)
+    const mat = new THREE.MeshStandardMaterial({ color: '#7a7068', roughness: 0.95, flatShading: true })
+
+    const matrices: THREE.Matrix4[] = []
+    for (const r of rocks) {
+      matrices.push(makeMatrixEuler(r.pos[0], r.pos[1], r.pos[2], r.scale, r.rot[0], r.rot[1], r.rot[2]))
+    }
+
+    return buildInstancedMesh(geo, mat, matrices)
+  }, [rocks])
+
+  return <primitive object={mesh} />
+}
+
+/**
+ * InstancedGrass — 4 cones per clump, but we flatten to 1 InstancedMesh per cone slot.
+ * Uses polygonOffset to prevent z-fighting.
+ */
+function InstancedGrass({ grass }: { grass: Array<[number, number, number]> }) {
+  const meshes = useMemo(() => {
+    const geo = new THREE.ConeGeometry(0.018, 0.14, 3)
+    const matA = new THREE.MeshStandardMaterial({ color: '#4a9a2a', polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+    const matB = new THREE.MeshStandardMaterial({ color: '#3a7a22', polygonOffset: true, polygonOffsetFactor: -1, polygonOffsetUnits: -1 })
+
+    // 4 blades per clump, at fixed offsets
+    const offsets = [0, 1, 2, 3].map(i => ({
+      x: Math.cos(i * 1.57) * 0.05,
+      z: Math.sin(i * 1.57) * 0.05,
+      rx: 0.05 * Math.cos(i),
+      rz: 0.05 * Math.sin(i),
+      even: i % 2 === 0,
+    }))
+
+    const matricesA: THREE.Matrix4[] = []
+    const matricesB: THREE.Matrix4[] = []
+
+    for (const [gx, gy, gz] of grass) {
+      for (const o of offsets) {
+        const m = makeMatrixEuler(gx + o.x, gy + 0.07, gz + o.z, 1, o.rx, 0, o.rz)
+        if (o.even) matricesA.push(m)
+        else matricesB.push(m)
+      }
+    }
+
+    const result: THREE.InstancedMesh[] = []
+    if (matricesA.length > 0) result.push(buildInstancedMesh(geo, matA, matricesA))
+    if (matricesB.length > 0) result.push(buildInstancedMesh(geo, matB, matricesB))
+    return result
+  }, [grass])
+
   return (
-    <mesh position={position} scale={scale} rotation={rotation || [0, 0, 0]}>
-      <dodecahedronGeometry args={[0.35, 0]} />
-      <meshStandardMaterial color="#7a7068" roughness={0.95} flatShading />
-    </mesh>
+    <>
+      {meshes.map((m, i) => <primitive key={i} object={m} />)}
+    </>
   )
 }
 
-function FlowerPatch({ position }: { position: [number, number, number] }) {
-  const COLORS = ['#ff6b8a', '#ffaa4c', '#e85eff', '#ffd700', '#55aaff']
-  const flowers = useMemo(() =>
-    Array.from({ length: 6 }, () => ({
-      x: (Math.random() - 0.5) * 0.6, z: (Math.random() - 0.5) * 0.6,
-      color: COLORS[Math.floor(Math.random() * COLORS.length)],
-    })), [])
+/**
+ * InstancedFlowers — each FlowerPatch has 6 tiny spheres. We flatten all into 1 InstancedMesh.
+ * We use a seeded random per patch index so it's deterministic.
+ */
+function InstancedFlowers({ flowers }: { flowers: Array<[number, number, number]> }) {
+  const mesh = useMemo(() => {
+    const COLORS = ['#ff6b8a', '#ffaa4c', '#e85eff', '#ffd700', '#55aaff']
+    const geo = new THREE.SphereGeometry(0.03, 6, 6)
+
+    // Group by color for separate materials (emissive varies)
+    const matricesByColor = new Map<string, THREE.Matrix4[]>()
+    for (const c of COLORS) matricesByColor.set(c, [])
+
+    // Simple seeded random for deterministic flower placement
+    let seed = 42
+    const srand = () => { seed = (seed * 16807 + 0) % 2147483647; return (seed - 1) / 2147483646 }
+
+    for (const [fx, fy, fz] of flowers) {
+      for (let j = 0; j < 6; j++) {
+        const ox = (srand() - 0.5) * 0.6
+        const oz = (srand() - 0.5) * 0.6
+        const color = COLORS[Math.floor(srand() * COLORS.length)]
+        const m = makeMatrix(fx + ox, fy + 0.08, fz + oz, 1)
+        matricesByColor.get(color)!.push(m)
+      }
+    }
+
+    const result: THREE.InstancedMesh[] = []
+    for (const [color, matrices] of matricesByColor) {
+      if (matrices.length === 0) continue
+      const mat = new THREE.MeshStandardMaterial({ color, emissive: color, emissiveIntensity: 0.3 })
+      result.push(buildInstancedMesh(geo, mat, matrices))
+    }
+
+    return result
+  }, [flowers])
+
   return (
-    <group position={position}>
-      {flowers.map((f, i) => (
-        <group key={i} position={[f.x, 0.08, f.z]}>
-          <mesh><sphereGeometry args={[0.03, 6, 6]} /><meshStandardMaterial color={f.color} emissive={f.color} emissiveIntensity={0.3} /></mesh>
-        </group>
-      ))}
-    </group>
+    <>
+      {mesh.map((m, i) => <primitive key={i} object={m} />)}
+    </>
   )
 }
 
-function GrassClump({ position }: { position: [number, number, number] }) {
+/**
+ * InstancedFences — 4 parts per fence segment.
+ */
+function InstancedFences({ fences }: {
+  fences: Array<{ pos: [number, number, number]; rot: [number, number, number] }>
+}) {
+  const meshes = useMemo(() => {
+    if (fences.length === 0) return []
+
+    const postGeo = new THREE.CylinderGeometry(0.025, 0.03, 0.4, 5)
+    const railGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.8, 4)
+    const postMat = new THREE.MeshStandardMaterial({ color: '#7a5a38' })
+    const railMat = new THREE.MeshStandardMaterial({ color: '#8a6a48' })
+
+    const postMs: THREE.Matrix4[] = []
+    const railMs: THREE.Matrix4[] = []
+
+    for (const f of fences) {
+      const [px, py, pz] = f.pos
+      const [rx, ry, rz] = f.rot
+
+      // We need to compose the group rotation with each child's local offset.
+      // Build group matrix, then compose child offsets.
+      const groupMat = new THREE.Matrix4().compose(
+        new THREE.Vector3(px, py, pz),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(rx, ry, rz)),
+        new THREE.Vector3(1, 1, 1),
+      )
+
+      // Left post: local pos [-0.4, 0.2, 0]
+      const lp = new THREE.Matrix4().makeTranslation(-0.4, 0.2, 0)
+      postMs.push(new THREE.Matrix4().multiplyMatrices(groupMat, lp))
+
+      // Right post: local pos [0.4, 0.2, 0]
+      const rp = new THREE.Matrix4().makeTranslation(0.4, 0.2, 0)
+      postMs.push(new THREE.Matrix4().multiplyMatrices(groupMat, rp))
+
+      // Top rail: local pos [0, 0.32, 0], rotation [0, 0, PI/2]
+      const tr = new THREE.Matrix4().compose(
+        new THREE.Vector3(0, 0.32, 0),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)),
+        new THREE.Vector3(1, 1, 1),
+      )
+      railMs.push(new THREE.Matrix4().multiplyMatrices(groupMat, tr))
+
+      // Bottom rail: local pos [0, 0.15, 0], rotation [0, 0, PI/2]
+      const br = new THREE.Matrix4().compose(
+        new THREE.Vector3(0, 0.15, 0),
+        new THREE.Quaternion().setFromEuler(new THREE.Euler(0, 0, Math.PI / 2)),
+        new THREE.Vector3(1, 1, 1),
+      )
+      railMs.push(new THREE.Matrix4().multiplyMatrices(groupMat, br))
+    }
+
+    return [
+      buildInstancedMesh(postGeo, postMat, postMs),
+      buildInstancedMesh(railGeo, railMat, railMs),
+    ]
+  }, [fences])
+
   return (
-    <group position={position}>
-      {Array.from({ length: 4 }).map((_, i) => (
-        <mesh key={i} position={[Math.cos(i * 1.57) * 0.05, 0.07, Math.sin(i * 1.57) * 0.05]}
-          rotation={[0.05 * Math.cos(i), 0, 0.05 * Math.sin(i)]}>
-          <coneGeometry args={[0.018, 0.14, 3]} />
-          <meshStandardMaterial color={i % 2 === 0 ? '#4a9a2a' : '#3a7a22'} />
-        </mesh>
-      ))}
-    </group>
+    <>
+      {meshes.map((m, i) => <primitive key={i} object={m} />)}
+    </>
   )
 }
-
-/* ─────────────── DECORATIVE PROPS ─────────────── */
 export function Lantern({ position, color = '#ffaa44' }: { position: [number, number, number]; color?: string }) {
   const ref = useRef<THREE.Mesh>(null)
   useFrame(({ clock }) => { if (ref.current) ref.current.scale.setScalar(1 + Math.sin(clock.getElapsedTime() * 3) * 0.1) })
@@ -258,7 +507,6 @@ export function Lantern({ position, color = '#ffaa44' }: { position: [number, nu
       <mesh position={[0, 0.3, 0]}><cylinderGeometry args={[0.03, 0.04, 0.6, 6]} /><meshStandardMaterial color="#5a4a3a" /></mesh>
       <mesh position={[0, 0.65, 0]}><boxGeometry args={[0.12, 0.15, 0.12]} /><meshStandardMaterial color="#3a3028" /></mesh>
       <mesh ref={ref} position={[0, 0.65, 0]}><sphereGeometry args={[0.055, 8, 8]} /><meshStandardMaterial color={color} emissive={color} emissiveIntensity={4} toneMapped={false} /></mesh>
-      <pointLight position={[0, 0.65, 0]} color={color} intensity={2} distance={6} decay={2} />
     </group>
   )
 }
@@ -287,7 +535,6 @@ export function Campfire({ position }: { position: [number, number, number] }) {
       {Array.from({ length: 8 }).map((_, i) => { const a = (i / 8) * Math.PI * 2; return <mesh key={i} position={[Math.cos(a) * 0.18, 0.03, Math.sin(a) * 0.18]}><sphereGeometry args={[0.04, 6, 6]} /><meshStandardMaterial color="#666" /></mesh> })}
       <mesh ref={ref} position={[0, 0.2, 0]}><coneGeometry args={[0.09, 0.35, 8]} /><meshStandardMaterial color="#ff6600" emissive="#ff4400" emissiveIntensity={2.5} toneMapped={false} /></mesh>
       <mesh position={[0, 0.22, 0]}><coneGeometry args={[0.04, 0.25, 6]} /><meshStandardMaterial color="#ffcc00" emissive="#ffaa00" emissiveIntensity={3} toneMapped={false} /></mesh>
-      <pointLight position={[0, 0.35, 0]} color="#ff8844" intensity={5} distance={10} decay={2} />
     </group>
   )
 }
@@ -297,17 +544,6 @@ export function Signpost({ position }: { position: [number, number, number] }) {
     <group position={position}>
       <mesh position={[0, 0.5, 0]}><cylinderGeometry args={[0.03, 0.04, 1, 6]} /><meshStandardMaterial color="#6b5a42" /></mesh>
       <mesh position={[0.28, 0.85, 0]}><boxGeometry args={[0.55, 0.15, 0.03]} /><meshStandardMaterial color="#8b7355" flatShading /></mesh>
-    </group>
-  )
-}
-
-function FenceSegment({ position, rotation = [0, 0, 0] }: { position: [number, number, number]; rotation?: [number, number, number] }) {
-  return (
-    <group position={position} rotation={rotation}>
-      <mesh position={[-0.4, 0.2, 0]}><cylinderGeometry args={[0.025, 0.03, 0.4, 5]} /><meshStandardMaterial color="#7a5a38" /></mesh>
-      <mesh position={[0.4, 0.2, 0]}><cylinderGeometry args={[0.025, 0.03, 0.4, 5]} /><meshStandardMaterial color="#7a5a38" /></mesh>
-      <mesh position={[0, 0.32, 0]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[0.015, 0.015, 0.8, 4]} /><meshStandardMaterial color="#8a6a48" /></mesh>
-      <mesh position={[0, 0.15, 0]} rotation={[0, 0, Math.PI / 2]}><cylinderGeometry args={[0.015, 0.015, 0.8, 4]} /><meshStandardMaterial color="#8a6a48" /></mesh>
     </group>
   )
 }
@@ -394,18 +630,19 @@ export default function Mountain() {
   const [surfaceVersion, setSurfaceVersion] = useState(0)
 
   useEffect(() => {
+    // Subscribe FIRST so we receive the notification triggered by registerTerrainSurface
+    const unsubscribe = onTerrainSurfaceChange(() => setSurfaceVersion((v) => v + 1))
     registerTerrainSurface(terrainRef.current)
-    return () => registerTerrainSurface(null)
-  }, [])
-
-  useEffect(() => {
-    return onTerrainSurfaceChange(() => setSurfaceVersion((v) => v + 1))
+    return () => {
+      unsubscribe()
+      registerTerrainSurface(null)
+    }
   }, [])
 
   const snapPoint = (x: number, z: number, embed = 0) => {
     const hit = sampleTerrainSurface(x, z)
-    if (!hit) return { x, y: getTerrainHeight(x, z) - embed, z }
-    return { x: hit.point.x, y: hit.point.y - embed, z: hit.point.z }
+    if (!hit) return { x, y: getTerrainHeight(x, z) - embed, z, normalY: getTerrainNormal(x, z).y }
+    return { x: hit.point.x, y: hit.point.y - embed, z: hit.point.z, normalY: hit.normal.y }
   }
 
   // Place props on the terrain surface
@@ -413,13 +650,12 @@ export default function Mountain() {
     const arr: Array<{ pos: [number, number, number]; scale: number; variant: number; type: 'pine' | 'round' }> = []
     for (let i = 0; i < 220; i++) {
       const a = Math.random() * Math.PI * 2
-      const r = 4 + Math.random() * 31
+      const r = 4 + Math.random() * 26 // max 30, safely inside MOUNTAIN_BASE_RADIUS
       const x = Math.cos(a) * r
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.04)
       const y = p.y
-      const gentle = isWalkableSlope(x, z, 0.54)
-      if (y < TERRAIN_PEAK_HEIGHT * 0.82 && y > 0.4 && gentle) {
+      if (y < TERRAIN_PEAK_HEIGHT * 0.82 && y > 0.4 && p.normalY >= 0.54) {
         arr.push({
           pos: [p.x, y, p.z],
           scale: 0.35 + Math.random() * 0.9,
@@ -433,12 +669,12 @@ export default function Mountain() {
 
   const bushes = useMemo(() =>
     Array.from({ length: 110 }, () => {
-      const a = Math.random() * Math.PI * 2, r = 6 + Math.random() * 28
+      const a = Math.random() * Math.PI * 2, r = 6 + Math.random() * 24 // max 30
       const x = Math.cos(a) * r
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.03)
       const y = p.y
-      return y < TERRAIN_PEAK_HEIGHT * 0.72 && y > 0.3 && isWalkableSlope(x, z, 0.5)
+      return y < TERRAIN_PEAK_HEIGHT * 0.72 && y > 0.3 && p.normalY >= 0.5
         ? { pos: [p.x, y, p.z] as [number, number, number], scale: 0.4 + Math.random() * 0.8 }
         : null
     }).filter(Boolean) as Array<{ pos: [number, number, number]; scale: number }>, [surfaceVersion])
@@ -450,19 +686,19 @@ export default function Mountain() {
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.01)
       const y = p.y
-      return y < TERRAIN_PEAK_HEIGHT * 0.58 && y > 0.5 && isWalkableSlope(x, z, 0.58)
+      return y < TERRAIN_PEAK_HEIGHT * 0.58 && y > 0.5 && p.normalY >= 0.58
         ? [p.x, y, p.z] as [number, number, number]
         : null
     }).filter(Boolean) as Array<[number, number, number]>, [surfaceVersion])
 
   const rocks = useMemo(() =>
     Array.from({ length: 180 }, () => {
-      const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 32
+      const a = Math.random() * Math.PI * 2, r = 3 + Math.random() * 27 // max 30
       const x = Math.cos(a) * r
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.05)
       const y = p.y
-      return y > 0.3 ? {
+      return y > 0.3 && p.normalY >= 0.35 ? {
         pos: [p.x, y, p.z] as [number, number, number],
         scale: 0.2 + Math.random() * 1.05,
         rot: [Math.random() * 0.5, Math.random() * Math.PI, 0] as [number, number, number],
@@ -476,7 +712,7 @@ export default function Mountain() {
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.02)
       const y = p.y
-      return y < TERRAIN_PEAK_HEIGHT * 0.6 && y > 0.3 && isWalkableSlope(x, z, 0.56)
+      return y < TERRAIN_PEAK_HEIGHT * 0.6 && y > 0.3 && p.normalY >= 0.56
         ? [p.x, y, p.z] as [number, number, number]
         : null
     }).filter(Boolean) as Array<[number, number, number]>, [surfaceVersion])
@@ -489,7 +725,7 @@ export default function Mountain() {
       const z = Math.sin(a) * r
       const p = snapPoint(x, z, 0.02)
       const y = p.y
-      return y > 0.5 && y < TERRAIN_PEAK_HEIGHT * 0.3 ? {
+      return y > 0.5 && y < TERRAIN_PEAK_HEIGHT * 0.3 && p.normalY >= 0.5 ? {
         pos: [p.x, y, p.z] as [number, number, number],
         rot: [0, a + Math.PI / 2, 0] as [number, number, number],
       } : null
@@ -503,16 +739,13 @@ export default function Mountain() {
         <meshMatcapMaterial matcap={mountainMatcap} color="#8f7f74" flatShading />
       </mesh>
 
-      {/* PROPS — all placed on terrain surface */}
-      {trees.map((t, i) => t.type === 'pine'
-        ? <PineTree key={`t${i}`} position={t.pos} scale={t.scale} variant={t.variant} />
-        : <RoundTree key={`t${i}`} position={t.pos} scale={t.scale} variant={t.variant} />
-      )}
-      {bushes.map((b, i) => <Bush key={`b${i}`} position={b.pos} scale={b.scale} />)}
-      {flowers.map((f, i) => <FlowerPatch key={`f${i}`} position={f} />)}
-      {rocks.map((r, i) => <Rock key={`r${i}`} position={r.pos} scale={r.scale} rotation={r.rot} />)}
-      {grass.map((g, i) => <GrassClump key={`g${i}`} position={g} />)}
-      {fences.map((f, i) => <FenceSegment key={`fn${i}`} position={f.pos} rotation={f.rot} />)}
+      {/* PROPS — all placed on terrain surface via InstancedMesh */}
+      <InstancedTrees trees={trees} />
+      <InstancedBushes bushes={bushes} />
+      <InstancedFlowers flowers={flowers} />
+      <InstancedRocks rocks={rocks} />
+      <InstancedGrass grass={grass} />
+      <InstancedFences fences={fences} />
       <Fireflies count={60} />
     </>
   )

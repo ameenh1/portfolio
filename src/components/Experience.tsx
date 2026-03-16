@@ -62,7 +62,7 @@ export default function Experience({ onLoaded }: Props) {
     <Canvas
       camera={{ fov: 55, near: 0.1, far: 200, position: [0, 2, 20] }}
       style={{ width: '100vw', height: '100vh' }}
-      dpr={[1.5, 2.2]}
+      dpr={[1, 1.5]}
       gl={{ antialias: true, alpha: false, toneMapping: THREE.ACESFilmicToneMapping, toneMappingExposure: 0.9 }}
     >
       <color attach="background" args={['#0f1724']} />

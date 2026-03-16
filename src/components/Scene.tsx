@@ -290,6 +290,7 @@ function ZoneOverlays() {
         <group key={zone.name} position={zone.position.toArray()}>
           <Html
             center
+            position={[0, -2.5, 0]}
             distanceFactor={15}
             style={{ pointerEvents: 'auto' }}
             occlude={false}
@@ -443,13 +444,27 @@ function TrailPath() {
 
 function SkyDome() {
   const geometry = useMemo(() => new THREE.SphereGeometry(180, 64, 32), [])
+  const meshRef = useRef<THREE.Mesh>(null)
+
   const material = useMemo(() => {
     return new THREE.ShaderMaterial({
       side: THREE.BackSide,
       depthWrite: false,
       uniforms: {
-        topColor: { value: new THREE.Color('#0c1526') },
-        bottomColor: { value: new THREE.Color('#1a1f2a') },
+        uTime: { value: 0 },
+        uTopColor: { value: new THREE.Color('#1a0a2e') },
+        uMidColor: { value: new THREE.Color('#4a1942') },
+        uBottomColor: { value: new THREE.Color('#ff6b35') },
+        uPulseSpeed: { value: 0.25 },
+        uPulseAmount: { value: 0.12 },
+        uAuroraColor1: { value: new THREE.Color('#00ffcc') },
+        uAuroraColor2: { value: new THREE.Color('#44ff88') },
+        uAuroraColor3: { value: new THREE.Color('#aa44ff') },
+        uAuroraOpacity: { value: 0.55 },
+        uAuroraSpeed: { value: 0.12 },
+        uCloudColor: { value: new THREE.Color('#ffffff') },
+        uCloudOpacity: { value: 0.28 },
+        uCloudSpeed: { value: 0.04 },
       },
       vertexShader: `
         varying vec3 vWorldPosition;
@@ -460,20 +475,118 @@ function SkyDome() {
         }
       `,
       fragmentShader: `
+        uniform float uTime;
+        uniform vec3 uTopColor;
+        uniform vec3 uMidColor;
+        uniform vec3 uBottomColor;
+        uniform float uPulseSpeed;
+        uniform float uPulseAmount;
+        uniform vec3 uAuroraColor1;
+        uniform vec3 uAuroraColor2;
+        uniform vec3 uAuroraColor3;
+        uniform float uAuroraOpacity;
+        uniform float uAuroraSpeed;
+        uniform vec3 uCloudColor;
+        uniform float uCloudOpacity;
+        uniform float uCloudSpeed;
+        
         varying vec3 vWorldPosition;
-        uniform vec3 topColor;
-        uniform vec3 bottomColor;
+        
+        // Simplex 2D noise
+        vec3 permute(vec3 x) { return mod(((x*34.0)+1.0)*x, 289.0); }
+        float snoise(vec2 v) {
+          const vec4 C = vec4(0.211324865405187, 0.366025403784439, -0.577350269189626, 0.024390243902439);
+          vec2 i  = floor(v + dot(v, C.yy));
+          vec2 x0 = v -   i + dot(i, C.xx);
+          vec2 i1;
+          i1 = (x0.x > x0.y) ? vec2(1.0, 0.0) : vec2(0.0, 1.0);
+          vec4 x12 = x0.xyxy + C.xxzz;
+          x12.xy -= i1;
+          i = mod(i, 289.0);
+          vec3 p = permute(permute(i.y + vec3(0.0, i1.y, 1.0)) + i.x + vec3(0.0, i1.x, 1.0));
+          vec3 m = max(0.5 - vec3(dot(x0,x0), dot(x12.xy,x12.xy), dot(x12.zw,x12.zw)), 0.0);
+          m = m*m;
+          m = m*m;
+          vec3 x = 2.0 * fract(p * C.www) - 1.0;
+          vec3 h = abs(x) - 0.5;
+          vec3 ox = floor(x + 0.5);
+          vec3 a0 = x - ox;
+          m *= 1.79284291400159 - 0.85373472095314 * (a0*a0 + h*h);
+          vec3 g;
+          g.x  = a0.x  * x0.x  + h.x  * x0.y;
+          g.yz = a0.yz * x12.xz + h.yz * x12.yw;
+          return 130.0 * dot(m, g);
+        }
+        
+        // Aurora band function
+        float aurora(vec2 uv, float time) {
+          float n = snoise(vec2(uv.x * 2.5 + time * 0.08, uv.y * 1.2));
+          n += snoise(vec2(uv.x * 5.0 - time * 0.12, uv.y * 2.0)) * 0.5;
+          n += snoise(vec2(uv.x * 8.0 + time * 0.05, uv.y * 0.8)) * 0.25;
+          
+          float band = smoothstep(0.2, 0.5, n + uv.y * 0.6);
+          band *= smoothstep(0.95, 0.6, uv.y);
+          return band;
+        }
+        
+        // Smooth cartoon cloud
+        float cloudShape(vec2 uv) {
+          float c = 0.0;
+          c += 1.0 - smoothstep(0.12, 0.18, length(uv - vec2(0.0, 0.0)));
+          c += 1.0 - smoothstep(0.1, 0.15, length(uv - vec2(0.15, 0.05)));
+          c += 1.0 - smoothstep(0.08, 0.12, length(uv - vec2(-0.12, 0.04)));
+          c += 1.0 - smoothstep(0.09, 0.13, length(uv - vec2(0.05, -0.08)));
+          c += 1.0 - smoothstep(0.07, 0.11, length(uv - vec2(-0.08, -0.06)));
+          return clamp(c * 0.5, 0.0, 1.0);
+        }
+        
         void main() {
-          float h = normalize(vWorldPosition).y * 0.5 + 0.5;
-          h = smoothstep(0.05, 0.95, h);
-          vec3 color = mix(bottomColor, topColor, h);
-          gl_FragColor = vec4(color, 1.0);
+          vec3 dir = normalize(vWorldPosition);
+          float h = dir.y * 0.5 + 0.5;
+          
+          // Layer 1: Twilight gradient with pulse
+          float pulse = sin(uTime * uPulseSpeed) * uPulseAmount;
+          vec3 gradient = mix(uBottomColor, uMidColor, smoothstep(0.0, 0.35, h));
+          gradient = mix(gradient, uTopColor + pulse * 0.3, smoothstep(0.35, 0.95, h));
+          
+          // Layer 2: Aurora borealis
+          vec2 auroraUV = vec2(dir.x * 0.8 + uTime * uAuroraSpeed, dir.z * 0.5 + 0.5);
+          float auroraMask = aurora(auroraUV, uTime);
+          
+          float colorMix = sin(dir.x * 4.0 + uTime * 0.3) * 0.5 + 0.5;
+          vec3 auroraCol = mix(uAuroraColor1, uAuroraColor2, colorMix);
+          auroraCol = mix(auroraCol, uAuroraColor3, sin(dir.x * 6.0 - uTime * 0.5) * 0.5 + 0.5);
+          
+          float fresnel = pow(1.0 - abs(dir.y), 2.0) * 0.4;
+          gradient = mix(gradient, auroraCol, auroraMask * uAuroraOpacity * (0.7 + fresnel));
+          
+          // Layer 3: Cartoon clouds (in front, subtle)
+          vec2 cloudUV1 = vec2(dir.x * 0.3 + uTime * uCloudSpeed, dir.z * 0.2 + 0.3);
+          vec2 cloudUV2 = vec2(dir.x * 0.25 + uTime * uCloudSpeed * 0.8 + 0.5, dir.z * 0.2 - 0.2);
+          vec2 cloudUV3 = vec2(dir.x * 0.35 + uTime * uCloudSpeed * 1.2 - 0.3, dir.z * 0.15 + 0.6);
+          
+          float cloud1 = cloudShape(cloudUV1);
+          float cloud2 = cloudShape(cloudUV2);
+          float cloud3 = cloudShape(cloudUV3);
+          float cloudMask = max(max(cloud1, cloud2), cloud3);
+          
+          // Tint clouds slightly with aurora color
+          vec3 tintedCloud = mix(uCloudColor, auroraCol, 0.25);
+          gradient = mix(gradient, tintedCloud, cloudMask * uCloudOpacity);
+          
+          gl_FragColor = vec4(gradient, 1.0);
         }
       `,
     })
   }, [])
 
-  return <mesh geometry={geometry} material={material} />
+  useFrame(({ clock }) => {
+    if (meshRef.current) {
+      (meshRef.current.material as THREE.ShaderMaterial).uniforms.uTime.value = clock.getElapsedTime()
+    }
+  })
+
+  return <mesh ref={meshRef} geometry={geometry} material={material} />
 }
 
 /* ═══════════════════════════════════════

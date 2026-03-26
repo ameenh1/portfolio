@@ -23,16 +23,17 @@ const trailCurve = generateTrailCurve()
 /* ═══════════════════════════════════════
    ZONE & SIGN POSITIONS — on the trail
    ═══════════════════════════════════════ */
-const ZONE_TS = [0.03, 0.2, 0.42, 0.62, 0.95] as const
-const SIGN_TRAIL_TS = [0.08, 0.15, 0.35, 0.55, 0.85] as const
+const ZONE_TS = [0.03, 0.17, 0.33, 0.50, 0.67, 0.95] as const
+const SIGN_TRAIL_TS = [0.06, 0.12, 0.25, 0.40, 0.57, 0.90] as const
 const zonePositions = ZONE_TS.map(t => trailCurve.getPointAt(t))
 
 const zones = [
-  { name: 'base',     position: zonePositions[0], signT: SIGN_TRAIL_TS[0] },
-  { name: 'skills',   position: zonePositions[1], signT: SIGN_TRAIL_TS[1] },
-  { name: 'projects', position: zonePositions[2], signT: SIGN_TRAIL_TS[2] },
-  { name: 'awards',   position: zonePositions[3], signT: SIGN_TRAIL_TS[3] },
-  { name: 'summit',   position: zonePositions[4], signT: SIGN_TRAIL_TS[4] },
+  { name: 'base',        position: zonePositions[0], signT: SIGN_TRAIL_TS[0] },
+  { name: 'skills',      position: zonePositions[1], signT: SIGN_TRAIL_TS[1] },
+  { name: 'experience',  position: zonePositions[2], signT: SIGN_TRAIL_TS[2] },
+  { name: 'projects',    position: zonePositions[3], signT: SIGN_TRAIL_TS[3] },
+  { name: 'awards',      position: zonePositions[4], signT: SIGN_TRAIL_TS[4] },
+  { name: 'summit',      position: zonePositions[5], signT: SIGN_TRAIL_TS[5] },
 ]
 
 /* ═══════════════════════════════════════
@@ -529,7 +530,7 @@ function SkyDome() {
 /* ═══════════════════════════════════════
    TRAIL PROPS — campfire at base, signposts along trail
    ═══════════════════════════════════════ */
-const CRYSTAL_COLORS = ['#55aaff', '#e85eff', '#ff6b8a', '#ffd700', '#55ff88']
+const CRYSTAL_COLORS = ['#55aaff', '#e85eff', '#ff6b8a', '#ffd700', '#55ff88', '#ff8844']
 
 function TrailProps() {
   const [surfaceVersion, setSurfaceVersion] = useState(0)
@@ -550,7 +551,7 @@ function TrailProps() {
   }, [surfaceVersion])
 
   const signPositions = useMemo(() => {
-    return [0.08, 0.15, 0.35, 0.55, 0.85].map(t => {
+    return [0.06, 0.12, 0.25, 0.40, 0.57, 0.90].map(t => {
       const p = trailCurve.getPointAt(t)
       return snap(p.x + 0.5, p.z + 0.5, 0.03)
     })
@@ -657,35 +658,10 @@ function BaseCampTitle() {
             textTransform: 'uppercase' as const,
             marginTop: '6px',
           }}>
-            CS · Virginia Tech · Full-Stack & AI
+            CS · Virginia Tech · 3.75 GPA · Full-Stack & AI
           </div>
         </div>
       </Html>
-    </group>
-  )
-}
-
-/* ═══════════════════════════════════════
-   SUMMIT FLAG
-   ═══════════════════════════════════════ */
-function SummitFlag() {
-  const pos = useMemo(() => {
-    const p = trailCurve.getPointAt(0.99)
-    return [p.x, p.y + 0.5, p.z] as [number, number, number]
-  }, [])
-
-  return (
-    <group position={pos}>
-      <mesh position={[0, 0.5, 0]}>
-        <cylinderGeometry args={[0.03, 0.03, 2, 8]} />
-        <meshStandardMaterial color="#d4c8bb" />
-      </mesh>
-      <Float speed={3} rotationIntensity={0} floatIntensity={0.1}>
-        <mesh position={[0.4, 1.2, 0]}>
-          <planeGeometry args={[0.8, 0.5]} />
-          <meshStandardMaterial color="#c4915e" emissive="#c4915e" emissiveIntensity={0.3} side={THREE.DoubleSide} />
-        </mesh>
-      </Float>
     </group>
   )
 }
@@ -929,7 +905,6 @@ export default function Scene() {
       <HikerOnTrail />
       <ZoneMarkers />
       <BaseCampTitle />
-      <SummitFlag />
       <ZoneOverlays />
       <ProgressBar />
       <ScrollHint />
